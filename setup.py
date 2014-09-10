@@ -1,22 +1,29 @@
-import os
 from setuptools import setup
+import sys
 
-# Utility function to read the README file.
-# Used for the long_description.  It's nice, because now 1) we have a top level
-# README file and 2) it's easier to type in the README file than to put a raw
-# string in below ...
-def read(fname):
-    return open(os.path.join(os.path.dirname(__file__), fname)).read()
+requirements = [
+    'clize>=3.0a1'
+]
+
+if sys.version_info < (3, 3):
+    raise Exception("this version of python is too old")
+elif sys.version_info < (3, 4):
+    requirements.append('asyncio')
 
 setup(
-    name = "an_example_pypi_project",
-    version = "0.1",
-    author = "Deaygo, Ed Kellett, Tom Powell",
-    author_email = "mcw@thezomg.com",
-    description = ("A minecraft server wrapper."),
-    license = "MIT",
-    keywords = "minecraft server wrapper",
-    url = "https://github.com/Thezomg/mcw",
-    packages=['mcw', 'tests'],
-    long_description=read('README.md'),
+    name='mcw',
+    version='0.1a1',
+    description='minimalist minecraft server wrapper',
+    packages=['mcw'],
+    zip_safe=True,
+    entry_points={
+        'console_scripts': [
+            'mcw = mcw.cli:main',
+        ]
+    },
+    install_requires=requirements,
+    author='Deaygo, Ed Kellett, Tom Powell',
+    author_email='edk@kellett.im',
+    url='https://github.com/Thezomg/mcw',
+    long_description='TBA',
 )
