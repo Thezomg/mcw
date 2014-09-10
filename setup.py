@@ -14,7 +14,7 @@ setup(
     author = "Deaygo, Ed Kellett, Tom Powell",
     author_email = "mcw@thezomg.com",
     description = ("A minecraft server wrapper."),
-    license = "",
+    license = "MIT",
     keywords = "minecraft server wrapper",
     url = "https://github.com/Thezomg/mcw",
     packages=['mcw', 'tests'],
