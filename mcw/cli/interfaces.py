@@ -4,6 +4,7 @@ import json
 import os
 import random
 import string
+import codecs
 
 class ServerWrapper(object):
     """
@@ -13,8 +14,9 @@ class ServerWrapper(object):
     def __init__(self, socket_path=None):
         self.process = None
         self.controller = None
-        self.events = asyncio.Queue()
+        self.events = asyncio.Queue(loop=asyncio.get_event_loop())
         self.socket_path = socket_path
+        self._event_process = None
 
     @asyncio.coroutine
     def start_server(self):
@@ -25,14 +27,16 @@ class ServerWrapper(object):
                     os.unlink(self.socket_path)
                 except:
                     print("File doesn't exist")
-                self.server = self._create_socket(self.socket_path)
+                #self.server = self._create_socket(self.socket_path)
+                #yield from asyncio.start_unix_server(CommandServer.factory(self), self.socket_path)
+                yield from self._create_socket(self.socket_path)
                 return
             except:
                 raise Exception('Failed to create control socket')
         for i in range(16):
             print(i)
             try:
-                self._create_socket('/tmp/mcw-{}.sock'.format(''.join(
+                yield from self._create_socket('/tmp/mcw-{}.sock'.format(''.join(
                     random.choice(string.ascii_lowercase) for i in range(16))))
                 return
             except:
@@ -41,6 +45,7 @@ class ServerWrapper(object):
 
         raise Exception('Failed to create control socket')
 
+    @asyncio.coroutine
     def _create_socket(self, path):
         if os.path.exists(path):
             raise FileExistsError('The socket already exists')
@@ -50,7 +55,7 @@ class ServerWrapper(object):
         return server
 
     @asyncio.coroutine
-    def start_process(self, process):
+    def start_process(self, command):
         loop = asyncio.get_event_loop()
         factory = ProcessProtocol.factory(self)
         transport, self.process = yield from loop.subprocess_exec(
@@ -64,7 +69,6 @@ class ServerWrapper(object):
     @asyncio.coroutine
     def new_connection(self, sock):
         if self.controller is not None:
-            self.send_event()
             self.controller.close()
         self.controller = sock
         self._event_process = asyncio.async(self.process_events())
@@ -75,13 +79,12 @@ class ServerWrapper(object):
         self.controller = None
 
     @asyncio.coroutine
-    def send_event(**kwargs):
-        s = json.dumps(kwargs)
-        self.events.put(s)
+    def send_event(self, **kwargs):
+        yield from self.events.put(kwargs)
 
     @asyncio.coroutine
     def process_events(self):
-        while True:
+        while not self._event_process.done():
             ev = yield from self.events.get()
             try:
                 if self.controller is not None:
@@ -104,6 +107,18 @@ class ServerWrapper(object):
             yield from self.process.ev_write(obj)
         elif typ == 'kill':
             yield from self.process.ev_kill(obj)
+
+class StdStream:
+    def __init__(self, encoding, errors='replace'):
+        self.buffer_ = ''
+        self.decoder = codecs.getincrementaldecoder(encoding)(errors)
+
+    def feed_data(self, data):
+        self.buffer_ += self.decoder.decode(data)
+
+    def get_lines(self):
+        *lines, self.buffer_ = self.buffer_.split('\n')
+        return lines
 
 class ProcessProtocol(asyncio.SubprocessProtocol):
     def __init__(self, wrapper):
@@ -146,6 +161,9 @@ class CommandServer(asyncio.Protocol):
         self.wrapper = wrapper
         self.reader = reader
         self.writer = writer
+
+    def close(self):
+        self.writer.close()
 
     @classmethod
     def factory(cls, wrapper):
