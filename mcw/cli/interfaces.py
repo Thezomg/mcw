@@ -190,7 +190,7 @@ class CommandServer(asyncio.Protocol):
         yield from self.writer.drain()
 
 @clize.clize
-def _run(*, socket_path=None, debug=False):
+def start(*, socket_path=None, debug=False):
     import logging
     if debug:
         logging.basicConfig(level=logging.DEBUG)
@@ -201,8 +201,12 @@ def _run(*, socket_path=None, debug=False):
     sw = ServerWrapper(socket_path=socket_path)
     sw.run()
 
+@clize.clize
+def attach(server_name):
+    print('Connect to {}'.format(server_name))
+
 def main():
-    clize.run(_run)
+    clize.run(attach, start)
 
 if __name__ == '__main__':
     clize.run(_run)
