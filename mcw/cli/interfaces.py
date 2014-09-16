@@ -11,67 +11,33 @@ class ServerWrapper(object):
     ServerWrapper starts the server process and handles the standard in and out.
     """
 
-    def __init__(self, socket_path=None):
-        self.process = None
-        self.controller = None
-        self.events = asyncio.Queue(loop=asyncio.get_event_loop())
-        self.socket_path = socket_path
-        self._event_process = None
+    def __init__(self, plugin_path=None):
+        self.server_process = None
+        self.plugin_process = None
+        self._to_plugin = asyncio.Queue(loop=asyncio.get_event_loop())
+        self.plugin_path = None
+        self._plugin_write = None
 
     @asyncio.coroutine
-    def start_server(self):
-        if self.socket_path is not None:
-            print("Socket path provided")
-            try:
-                try:
-                    os.unlink(self.socket_path)
-                except:
-                    print("File doesn't exist")
-                #self.server = self._create_socket(self.socket_path)
-                #yield from asyncio.start_unix_server(CommandServer.factory(self), self.socket_path)
-                yield from self._create_socket(self.socket_path)
-                return
-            except:
-                raise Exception('Failed to create control socket')
-        for i in range(16):
-            print(i)
-            try:
-                yield from self._create_socket('/tmp/mcw-{}.sock'.format(''.join(
-                    random.choice(string.ascii_lowercase) for i in range(16))))
-                return
-            except:
-                print("ERROR!")
-                continue
-
-        raise Exception('Failed to create control socket')
-
-    @asyncio.coroutine
-    def _create_socket(self, path):
-        if os.path.exists(path):
-            raise FileExistsError('The socket already exists')
-        print("Creating socket")
-        server = yield from asyncio.start_unix_server(CommandServer.factory(self), path)
-        print('Socket path: {}'.format(path))
-        return server
-
-    @asyncio.coroutine
-    def start_process(self, command):
+    def start_server_process(self, command):
         loop = asyncio.get_event_loop()
         factory = ProcessProtocol.factory(self)
-        transport, self.process = yield from loop.subprocess_exec(
+        transport, self.server_process = yield from loop.subprocess_exec(
                 factory, *command)
         return transport.get_pid()
 
-    def run(self):
-        asyncio.async(self.start_server())
-        asyncio.get_event_loop().run_forever()
-
     @asyncio.coroutine
-    def new_connection(self, sock):
-        if self.controller is not None:
-            self.controller.close()
-        self.controller = sock
-        self._event_process = asyncio.async(self.process_events())
+    def start_plugin_process(self):
+        loop = asyncio.get_event_loop()
+        factory = ProcessProtocol.factory(self)
+        transport, self.plugin_service = yield from loop.subprocess_exec(
+                factory, 'mcw', 'plugin')
+        self._plugin_write = asyncio.async(self.write_to_plugin())
+        return transport.get_pid()
+
+    def run(self):
+        asyncio.async(self.start_plugin_process())
+        asyncio.get_event_loop().run_forever()
 
     def connection_closed(self):
         if self._event_process is not None:
@@ -80,33 +46,52 @@ class ServerWrapper(object):
 
     @asyncio.coroutine
     def send_event(self, **kwargs):
-        yield from self.events.put(kwargs)
+        yield from self._to_plugin.put(kwargs)
 
     @asyncio.coroutine
-    def process_events(self):
-        while not self._event_process.done():
-            ev = yield from self.events.get()
+    def write_to_plugin(self):
+        while not self._plugin_write.done():
+            ev = yield from self._to_plugin.get()
             try:
-                if self.controller is not None:
-                    yield from self.controller.definitely_write(ev)
+                yield from self.plugin.ev_write(ev + "\n")
             except:
-                print('Failed to write to socket')
+                print('Failed to write to plugin process')
 
-    def process_exited(self):
-        self.process = None
+    def process_output(self, process, typ, data):
+        if self.server_process == process:
+            asyncio.async(self.send_event(type=typ, data=data))
+        else:
+            asyncio.async(self.handle_event(json.loads(data)))
 
+    def process_exited(self, process, return_code):
+        if self.server_process == process:
+            self.server_process = None
+            asyncio.async(self.send_event(type="exit", status=return_code))
+        else:
+            self.plugin_process = None
+            self._plugin_write.cancel()
+
+    @asyncio.coroutine
     def handle_event(self, obj):
         typ = obj['type']
         if typ == 'start':
-            if self.process is None:
-                pid = yield from self.start_process(obj['command'])
+            if self.server_process is None:
+                pid = yield from self.start_server_process(obj['command'])
                 yield from self.send_event(type='start', result='success', pid=pid)
             else:
-                yield from self.send_event(type='error', message='fuck off')
+                yield from self.send_event(type='error', message='Server is already running')
         elif typ == 'write':
-            yield from self.process.ev_write(obj)
+            if self.server_process is not None:
+                yield from self.server_process.ev_write(obj)
+            else:
+                yield from self.send_event(type='error', message='Server is not running')
         elif typ == 'kill':
-            yield from self.process.ev_kill(obj)
+            if self.server_process is not None:
+                yield from self.server_process.ev_kill(obj)
+            else:
+                yield from self.send_event(type='error', message='Server is not running')
+        elif typ == 'stdout':
+            print("Got a stdout: {}".format(obj['message']))
 
 class StdStream:
     def __init__(self, encoding, errors='replace'):
@@ -150,44 +135,10 @@ class ProcessProtocol(asyncio.SubprocessProtocol):
             stream = self.stderr
         stream.feed_data(data)
         for line in stream.get_lines():
-            asyncio.async(self.wrapper.send_event(type=typ, data=line))
+            self.wrapper.process_output(self, typ, line)
 
     def process_exited(self):
-        self.wrapper.process_exited()
-        asyncio.async(self.wrapper.send_event(type="exit", status=self.process.get_returncode()))
-
-class CommandServer(asyncio.Protocol):
-    def __init__(self, wrapper, reader, writer):
-        self.wrapper = wrapper
-        self.reader = reader
-        self.writer = writer
-
-    def close(self):
-        self.writer.close()
-
-    @classmethod
-    def factory(cls, wrapper):
-        @asyncio.coroutine
-        def callback(reader, writer):
-            self = cls(wrapper, reader, writer)
-            yield from wrapper.new_connection(self)
-            yield from self.run()
-        return callback
-
-    @asyncio.coroutine
-    def run(self):
-        while True:
-            line = yield from self.reader.readline()
-            if line == b'' or not line.endswith(b"\n"):
-                self.wrapper.connection_closed()
-                return
-            line = line.decode('utf8')
-            yield from self.wrapper.handle_event(json.loads(line))
-
-    @asyncio.coroutine
-    def definitely_write(self, data):
-        self.writer.write((json.dumps(data) + '\n').encode('utf8'))
-        yield from self.writer.drain()
+        self.wrapper.process_exited(self, self.process.get_returncode())
 
 @clize.clize
 def start(*, socket_path=None, debug=False):
@@ -198,15 +149,19 @@ def start(*, socket_path=None, debug=False):
     else:
         logging.basicConfig(level=logging.INFO)
 
-    sw = ServerWrapper(socket_path=socket_path)
+    sw = ServerWrapper()
     sw.run()
 
 @clize.clize
 def attach(server_name):
     print('Connect to {}'.format(server_name))
 
+@clize.clize
+def plugin():
+    print(json.dumps({"type": "stdout", "message": "received"}))
+
 def main():
-    clize.run(attach, start)
+    clize.run(attach, start, plugin)
 
 if __name__ == '__main__':
-    clize.run(_run)
+    main()
